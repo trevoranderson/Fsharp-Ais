@@ -1,14 +1,18 @@
 ﻿open System
 open Astar
 
-type Square = 
+type Passable = 
     | Blank
-    | Wall
-    | Box
-    | Keeper
     | Goal
-    | BoxGoal
-    | KeeperGoal
+
+type OverPassable = 
+    | Box of Passable
+    | Keeper of Passable
+
+type Square = 
+    | Wall
+    | Moveable of Passable
+    | Piece of OverPassable
 
 type Coord = int * int
 
@@ -33,7 +37,7 @@ let getKeeperPos squares =
                let subIndex = 
                    Array.tryFindIndex (fun c -> 
                        match c with
-                       | Keeper | KeeperGoal -> true
+                       | Piece(Keeper(_)) -> true
                        | _ -> false) r
                match subIndex with
                | None -> false
@@ -42,7 +46,7 @@ let getKeeperPos squares =
     | Some(row) -> 
         match (Array.tryFindIndex (fun r -> 
                    match r with
-                   | Keeper | KeeperGoal -> true
+                   | Piece(Keeper(_)) -> true
                    | _ -> false) squares.[row]) with
         | None -> raise (System.Exception("Keeper expected, but not found"))
         | Some(col) -> (row, col)
@@ -51,7 +55,7 @@ let isGoal (g : GameState) =
     match (Array.tryFind (fun r -> 
                match (Array.tryFind (fun c -> 
                           match c with
-                          | Box -> true
+                          | Piece(Box(Blank)) -> true
                           | _ -> false) r) with
                | None -> false
                | _ -> true) g.Squares) with
@@ -94,62 +98,41 @@ let setSquares (g : GameState) (actions : SquareCoord list) nextKeeperPos =
     { KeeperPos = nextKeeperPos
       Squares = nextSquares }
 
+let keeperSquare (g : GameState) = 
+    let (kr, kc) = g.KeeperPos
+    match g.Squares.[kr].[kc] with
+    | Piece(Keeper(b)) -> b
+    | _ -> raise (System.Exception("Expected keeper square"))
+
 let nextStates (g : GameState) = 
     let (kr, kc) = g.KeeperPos
     let actions = getKeeperActions g
-    
-    let underKeeper = 
-        (match g.Squares.[kr].[kc] with
-         | Keeper -> Blank
-         | _ -> Goal)
+    let under = keeperSquare g
     actions
     |> List.map (fun a -> 
            match a with
            | Edge -> None
            | CloseTo((s, c)) -> 
                (match s with
-                | Wall | Box | BoxGoal -> None
-                | Blank -> 
-                    Some(setSquares g [ (Keeper, c)
-                                        (underKeeper, g.KeeperPos) ] c)
-                | Goal -> 
-                    Some(setSquares g [ (KeeperGoal, c)
-                                        (underKeeper, g.KeeperPos) ] c)
-                | Keeper | KeeperGoal -> raise (System.Exception("Is there more than one Keeper?")))
+                | Wall | Piece(Box(_)) -> None
+                | Moveable(b) -> 
+                    Some(setSquares g [ (Piece(Keeper(b)), c)
+                                        (Moveable(under), g.KeeperPos) ] c)
+                | Piece(Keeper(_)) -> raise (System.Exception("Is there more than one Keeper?")))
            | Central((closeSquare, closeCoord), (farSquare, farCoord)) -> 
                (match closeSquare with
                 | Wall -> None
-                | Blank -> 
-                    Some(setSquares g [ (Keeper, closeCoord)
-                                        (underKeeper, g.KeeperPos) ] closeCoord)
-                | Goal -> 
-                    Some(setSquares g [ (KeeperGoal, closeCoord)
-                                        (underKeeper, g.KeeperPos) ] closeCoord)
-                | Keeper | KeeperGoal -> raise (System.Exception("Is there more than one Keeper?"))
-                | Box -> 
+                | Moveable(b) -> 
+                    Some(setSquares g [ (Piece(Keeper(b)), closeCoord); (Moveable(under), g.KeeperPos) ] closeCoord)
+                | Piece(Keeper(_)) -> raise (System.Exception("Is there more than one Keeper?"))
+                | Piece(Box(u)) -> 
                     (match farSquare with
-                     | Wall | Box | BoxGoal -> None
-                     | Blank -> 
-                         Some(setSquares g [ (underKeeper, (kr, kc))
-                                             (Keeper, closeCoord)
-                                             (Box, farCoord) ] closeCoord)
-                     | Goal -> 
-                         Some(setSquares g [ (underKeeper, (kr, kc))
-                                             (Keeper, closeCoord)
-                                             (BoxGoal, farCoord) ] closeCoord)
-                     | Keeper | KeeperGoal -> raise (System.Exception("Is there more than one Keeper?")))
-                | BoxGoal -> 
-                    (match farSquare with
-                     | Wall | Box | BoxGoal -> None
-                     | Blank -> 
-                         Some(setSquares g [ (underKeeper, (kr, kc))
-                                             (KeeperGoal, closeCoord)
-                                             (Box, farCoord) ] closeCoord)
-                     | Goal -> 
-                         Some(setSquares g [ (underKeeper, (kr, kc))
-                                             (KeeperGoal, closeCoord)
-                                             (BoxGoal, farCoord) ] closeCoord)
-                     | Keeper | KeeperGoal -> raise (System.Exception("Is there more than one Keeper?")))))
+                     | Wall | Piece(Box(_)) -> None
+                     | Moveable(b) -> 
+                         Some(setSquares g [ (Moveable(under), (kr, kc))
+                                             (Piece(Keeper(u)), closeCoord)
+                                             (Piece(Box(b)), farCoord) ] closeCoord)
+                     | Piece(Keeper(_)) -> raise (System.Exception("Is there more than one Keeper?")))))
     |> List.choose (fun x -> 
            match x with
            | None -> None
@@ -163,14 +146,14 @@ let naiveManhattanHeuristic (g : GameState) =
         [ for r in 0..g.Squares.Length - 1 do
               for c in 0..g.Squares.[r].Length - 1 do
                   match g.Squares.[r].[c] with
-                  | Box | BoxGoal -> yield (r, c)
+                  | Piece(Box(_)) -> yield (r, c)
                   | _ -> () ]
     
     let Goals = 
         [ for r in 0..g.Squares.Length - 1 do
               for c in 0..g.Squares.[r].Length - 1 do
                   match g.Squares.[r].[c] with
-                  | Goal | BoxGoal | KeeperGoal -> yield (r, c)
+                  | Moveable(Goal) | Piece(Box(Goal)) | Piece(Keeper(Goal)) -> yield (r, c)
                   | _ -> () ]
     
     let minDist = 
@@ -189,13 +172,13 @@ let main argv =
         (Array.map (fun r -> 
              (Array.map (fun c -> 
                   match c with
-                  | '0' -> Blank
+                  | '0' -> Moveable(Blank)
                   | '1' -> Wall
-                  | '2' -> Box
-                  | '3' -> Keeper
-                  | '4' -> Goal
-                  | '5' -> BoxGoal
-                  | '6' -> KeeperGoal
+                  | '2' -> Piece(Box(Blank))
+                  | '3' -> Piece(Keeper(Blank))
+                  | '4' -> Moveable(Goal)
+                  | '5' -> Piece(Box(Goal))
+                  | '6' -> Piece(Keeper(Goal))
                   | _ -> raise (System.Exception("Invalid character in file input"))) r)) char2d)
     
     let k = 
