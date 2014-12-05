@@ -1,5 +1,6 @@
 ﻿open System
 open Astar
+open Hungarian
 
 type Passable = 
     | Blank
@@ -123,7 +124,8 @@ let nextStates (g : GameState) =
                (match closeSquare with
                 | Wall -> None
                 | Moveable(b) -> 
-                    Some(setSquares g [ (Piece(Keeper(b)), closeCoord); (Moveable(under), g.KeeperPos) ] closeCoord)
+                    Some(setSquares g [ (Piece(Keeper(b)), closeCoord)
+                                        (Moveable(under), g.KeeperPos) ] closeCoord)
                 | Piece(Keeper(_)) -> raise (System.Exception("Is there more than one Keeper?"))
                 | Piece(Box(u)) -> 
                     (match farSquare with
@@ -139,29 +141,72 @@ let nextStates (g : GameState) =
            | Some(s) -> Some(s))
     |> Set.ofList
 
+let getBoxes (g : GameState) = 
+    [ for r in 0..g.Squares.Length - 1 do
+          for c in 0..g.Squares.[r].Length - 1 do
+              match g.Squares.[r].[c] with
+              | Piece(Box(_)) -> yield (r, c)
+              | _ -> () ]
+
+let getGoals (g : GameState) = 
+    [ for r in 0..g.Squares.Length - 1 do
+          for c in 0..g.Squares.[r].Length - 1 do
+              match g.Squares.[r].[c] with
+              | Moveable(Goal) | Piece(Box(Goal)) | Piece(Keeper(Goal)) -> yield (r, c)
+              | _ -> () ]
+
+// Trivially admissable heuristic: 0. O(1)
 let trivialHeuristic (g : GameState) = 0.0
 
+// Adds total Manhattan distance of each box to its closest Goal + the closest way a player can get to a box to push it. O(n^2)
 let naiveManhattanHeuristic (g : GameState) = 
-    let Boxes = 
-        [ for r in 0..g.Squares.Length - 1 do
-              for c in 0..g.Squares.[r].Length - 1 do
-                  match g.Squares.[r].[c] with
-                  | Piece(Box(_)) -> yield (r, c)
-                  | _ -> () ]
-    
-    let Goals = 
-        [ for r in 0..g.Squares.Length - 1 do
-              for c in 0..g.Squares.[r].Length - 1 do
-                  match g.Squares.[r].[c] with
-                  | Moveable(Goal) | Piece(Box(Goal)) | Piece(Keeper(Goal)) -> yield (r, c)
-                  | _ -> () ]
-    
+    let Boxes = getBoxes g
     let minDist = 
         (List.fold 
              (fun bAcc (br, bc) -> 
-             (List.fold (fun gAcc (gr, gc) -> min (1 + (abs (br - gr)) + (abs (bc - gc))) gAcc) Int32.MaxValue Goals) 
+             (List.fold (fun gAcc (gr, gc) -> min ((abs (br - gr)) + (abs (bc - gc))) gAcc) Int32.MaxValue (getGoals g)) 
              :: bAcc) [] Boxes) |> List.fold (+) 0
-    double (minDist)
+    let (kr, kc) = g.KeeperPos
+    
+    let playerDist = 
+        ((Boxes |> List.fold (fun dist (br, bc) -> 
+                       let curDist = (abs (br - kr)) + (abs (bc - kc))
+                       if curDist < dist then curDist
+                       else dist) Int32.MaxValue)
+         - 1)
+    double (minDist + playerDist)
+
+// More sophisticated matching ensures each box maps to only one goal. O(n^3), but solves many maps much better
+let HungarianHeuristic(g : GameState) = 
+    let boxes = List.toArray (getBoxes g)
+    let goals = List.toArray (getGoals g)
+    let k = max boxes.Length goals.Length
+    
+    //Step0: Create a square matrix full of costs.  If things don't match, assume max cost
+    let preliminaryCostMatrix = 
+        [| for b in 0..k - 1 do
+               yield b |]
+        |> Array.map (fun b -> 
+               [| for g in 0..k - 1 do
+                      yield if b < boxes.Length && g < boxes.Length then 
+                                (let (br, bc) = boxes.[b]
+                                 let (gr, gc) = goals.[g]
+                                 (abs (br - gr)) + (abs (bc - gc)))
+                            else Int32.MaxValue |])
+    
+    let assignments = HungarianAlgorithm.Hungarian(preliminaryCostMatrix)
+    let (kr, kc) = g.KeeperPos
+    
+    let playerDist = 
+        ((boxes |> Array.fold (fun dist (br, bc) -> 
+                       let curDist = (abs (br - kr)) + (abs (bc - kc))
+                       if curDist < dist then curDist
+                       else dist) Int32.MaxValue)
+         - 1)
+    double ((assignments |> Array.fold (fun acc elem -> 
+                                let (r, c) = elem
+                                acc + preliminaryCostMatrix.[r].[c]) 0)
+            + playerDist)
 
 [<EntryPoint>]
 let main argv = 
@@ -170,24 +215,38 @@ let main argv =
     
     let sq = 
         (Array.map (fun r -> 
-             (Array.map (fun c -> 
-                  match c with
-                  | '0' -> Moveable(Blank)
-                  | '1' -> Wall
-                  | '2' -> Piece(Box(Blank))
-                  | '3' -> Piece(Keeper(Blank))
-                  | '4' -> Moveable(Goal)
-                  | '5' -> Piece(Box(Goal))
-                  | '6' -> Piece(Keeper(Goal))
-                  | _ -> raise (System.Exception("Invalid character in file input"))) r)) char2d)
+             r |> (Array.map (fun c -> 
+                       match c with
+                       | '0' -> Moveable(Blank)
+                       | '1' -> Wall
+                       | '2' -> Piece(Box(Blank))
+                       | '3' -> Piece(Keeper(Blank))
+                       | '4' -> Moveable(Goal)
+                       | '5' -> Piece(Box(Goal))
+                       | '6' -> Piece(Keeper(Goal))
+                       | _ -> raise (System.Exception("Invalid character in file input"))))) char2d)
     
     let k = 
         { KeeperPos = (getKeeperPos sq)
           Squares = sq }
     
+    let compareDists = (HungarianHeuristic k, naiveManhattanHeuristic k, trivialHeuristic k)
+    // Hungarian
+    let startDist = HungarianHeuristic k
+    let stopWatch = System.Diagnostics.Stopwatch.StartNew()
+    let res = Astar.AstarImpl.astar k nextStates isGoal (fun s -> 1.0) HungarianHeuristic
+    stopWatch.Stop()
+    printfn "%f ms elapsed at start distance: %f" stopWatch.Elapsed.TotalMilliseconds startDist
+    // Manhattan
     let startDist = naiveManhattanHeuristic k
     let stopWatch = System.Diagnostics.Stopwatch.StartNew()
     let res = Astar.AstarImpl.astar k nextStates isGoal (fun s -> 1.0) naiveManhattanHeuristic
+    stopWatch.Stop()
+    printfn "%f ms elapsed at start distance: %f" stopWatch.Elapsed.TotalMilliseconds startDist
+    //Trivially admissable
+    let startDist = trivialHeuristic k
+    let stopWatch = System.Diagnostics.Stopwatch.StartNew()
+    let res = Astar.AstarImpl.astar k nextStates isGoal (fun s -> 1.0) trivialHeuristic
     stopWatch.Stop()
     printfn "%f ms elapsed at start distance: %f" stopWatch.Elapsed.TotalMilliseconds startDist
     0 // return an integer exit code

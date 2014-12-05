@@ -49,6 +49,7 @@
   <ItemGroup>
     <None Include="App.config" />
     <Compile Include="A_Star.fs" />
+    <Compile Include="HungarianAlgorithm.fs" />
     <Compile Include="Sokoban.fs" />
   </ItemGroup>
   <PropertyGroup>
